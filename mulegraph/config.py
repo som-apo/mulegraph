@@ -22,13 +22,14 @@ class SimConfig:
     # These personas are chosen so that several of them are *hard negatives*:
     # a shopkeeper trips pass-through, drain speed, and fan-in all at once.
     persona_mix: dict = field(default_factory=lambda: {
-        "salaried":       0.32,
+        "salaried":       0.30,
         "student":        0.11,
         "shopkeeper":     0.07,
         "micro_merchant": 0.07,   # tiffin/tailoring/resale: fills the fan-in gap
-        "freelancer":     0.12,
+        "collector":      0.05,   # treasurer/chit-fund: the hardest negative
+        "freelancer":     0.11,
         "small_business": 0.07,
-        "low_activity":   0.24,
+        "low_activity":   0.22,
     })
 
     # Life events break an account's own baseline -- the same changepoint
@@ -83,7 +84,8 @@ class SimConfig:
         "low_activity":   0.32,
         "freelancer":     0.17,
         "micro_merchant": 0.08,
-        "salaried":       0.05,
+        "collector":      0.02,
+        "salaried":       0.03,
         "shopkeeper":     0.03,
         "small_business": 0.03,
     })
@@ -93,6 +95,15 @@ class SimConfig:
     # would do all the work and the graph layer would be fake.
     normal_device_share_rate: float = 0.03   # families sharing a phone
     subtle_ring_device_share: float = 0.35   # only some subtle accounts pair up
+
+    # In production, labels come from confirmed cases: a complaint was
+    # filed, an investigation ran, the account was proven to be a mule.
+    # Plenty of mules are never confirmed, so a fraction of the true
+    # positives sit in the data labelled as ordinary customers. Ignoring
+    # this is the single biggest way a synthetic fraud dataset ends up
+    # easier than the real thing -- the model gets a clean answer key that
+    # no fraud team has ever had.
+    unlabeled_ring_fraction: float = 0.40
 
     out_dir: str = "data"
 

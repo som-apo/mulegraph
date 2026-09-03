@@ -32,6 +32,24 @@ def _lognorm(rng, median, sigma, n):
     return np.maximum(rng.lognormal(np.log(median), sigma, size=n), 20.0)
 
 
+def _maybe_round(rng, amounts, p, base=500):
+    """Round a fraction of amounts to a clean figure.
+
+    Real people send round numbers constantly -- rent is 12,000, a gift is
+    5,100, a parent sends exactly 20,000. Retail spend is not round: a
+    grocery bill is 347. Getting this wrong is not cosmetic. The first
+    version of this simulator rounded only mule transfers, which made
+    "fraction of round amounts" a near-perfect mule detector and drove
+    PR-AUC to 0.997 on an artefact rather than on fraud.
+    """
+    out = np.asarray(amounts, dtype=float).copy()
+    if out.size == 0:
+        return out
+    mask = rng.random(out.size) < p
+    out[mask] = np.maximum(np.round(out[mask] / base) * base, base)
+    return out
+
+
 def _pool_draw(rng, pool, n, repeat_p):
     """Draw n counterparties from a pool, with `repeat_p` controlling how
     concentrated the draw is. High repeat_p -> the same faces keep coming
@@ -56,18 +74,20 @@ def gen_salaried(cfg, rng, reg, buf, acct, employer_hubs):
     salary_days = np.arange(1, cfg.n_days, 30)
     salary = float(_lognorm(rng, 55_000, 0.45, 1)[0])
     ts_sal = (salary_days * DAY + rng.integers(9 * 60, 12 * 60, salary_days.size)).astype(np.int32)
-    buf.add(ts_sal, employer, acct, np.full(salary_days.size, salary), CH_NEFT)
+    buf.add(ts_sal, employer, acct,
+            _maybe_round(rng, np.full(salary_days.size, salary), 0.6, 100), CH_NEFT)
 
     # rent: fixed beneficiary, a couple of days after payday
     rent = salary * rng.uniform(0.22, 0.34)
     ts_rent = ts_sal + rng.integers(2 * DAY, 4 * DAY, ts_sal.size)
     ts_rent = ts_rent[ts_rent < cfg.horizon_min]
-    buf.add(ts_rent, acct, landlord, np.full(ts_rent.size, rent), CH_IMPS)
+    buf.add(ts_rent, acct, landlord,
+            _maybe_round(rng, np.full(ts_rent.size, rent), 0.9), CH_IMPS)
 
     # everyday spending from a stable personal merchant set
     n_spend = rng.poisson(24 * cfg.weeks / 4.3)
     days = rng.integers(0, cfg.n_days, n_spend)
-    ts = _times(rng, days, np.ones(n_spend, dtype=int), 7, 23)
+    ts = _times(rng, days, np.ones(n_spend, dtype=int), 7, 26)
     amts = _lognorm(rng, salary * 0.012, 0.8, n_spend)
     buf.add(ts, acct, _pool_draw(rng, merchants, n_spend, 0.5), amts, CH_CARD)
 
@@ -86,12 +106,15 @@ def gen_student(cfg, rng, reg, buf, acct, _hubs):
     credit_days = np.arange(2, cfg.n_days, 30)
     amt = float(_lognorm(rng, 22_000, 0.4, 1)[0])
     ts_in = (credit_days * DAY + rng.integers(8 * 60, 20 * 60, credit_days.size)).astype(np.int32)
-    buf.add(ts_in, rng.choice(parents), acct, np.full(credit_days.size, amt), CH_UPI)
+    buf.add(ts_in, rng.choice(parents), acct,
+            _maybe_round(rng, np.full(credit_days.size, amt), 0.8), CH_UPI)
 
     # rent goes out the same day, 2-10 hours later
     ts_rent = ts_in + rng.integers(120, 600, ts_in.size)
     ts_rent = ts_rent[ts_rent < cfg.horizon_min]
-    buf.add(ts_rent, acct, landlord, np.full(ts_rent.size, amt * rng.uniform(0.45, 0.62)), CH_UPI)
+    buf.add(ts_rent, acct, landlord,
+            _maybe_round(rng, np.full(ts_rent.size, amt * rng.uniform(0.45, 0.62)), 0.85),
+            CH_UPI)
 
     if rng.random() < 0.5:
         buf.add(np.array([ts_in[0] + DAY * 3]), acct, college,
@@ -99,12 +122,25 @@ def gen_student(cfg, rng, reg, buf, acct, _hubs):
 
     n_spend = rng.poisson(9 * cfg.weeks / 4.3)
     days = rng.integers(0, cfg.n_days, n_spend)
-    ts = _times(rng, days, np.ones(n_spend, dtype=int), 8, 23)
+    ts = _times(rng, days, np.ones(n_spend, dtype=int), 8, 26)
     buf.add(ts, acct, _pool_draw(rng, merchants, n_spend, 0.5),
             _lognorm(rng, 320, 0.7, n_spend), CH_UPI)
 
 
-def gen_shopkeeper(cfg, rng, reg, buf, acct, _hubs):
+def _beneficiary(rng, reg, kind, internal_pool, p_internal):
+    """Pick a beneficiary that is sometimes an on-platform account.
+
+    A supplier, landlord or treasurer very often banks with the same
+    platform. If every legitimate outflow left the platform while every
+    mule forward stayed inside it, "pays an internal account" would be a
+    free mule detector and the graph layer's result would be an artefact.
+    """
+    if internal_pool is not None and len(internal_pool) and rng.random() < p_internal:
+        return int(rng.choice(internal_pool))
+    return reg.new(kind)
+
+
+def gen_shopkeeper(cfg, rng, reg, buf, acct, _hubs, internal_pool=None):
     """HARDEST NEGATIVE. Trips every account-level signal we have.
 
     Dozens of small credits a day from people the bank has never linked to
@@ -114,7 +150,8 @@ def gen_shopkeeper(cfg, rng, reg, buf, acct, _hubs):
     never changes, and it has looked exactly like this since day one.
     """
     customers = reg.new_many("retail_customer", 260)
-    suppliers = reg.new_many("supplier", rng.integers(1, 3))
+    suppliers = np.array([_beneficiary(rng, reg, "supplier", internal_pool, 0.45)
+                          for _ in range(int(rng.integers(1, 3)))], dtype=np.int64)
     merchants = reg.new_many("merchant", 6)
 
     days = np.arange(cfg.n_days)
@@ -136,7 +173,7 @@ def gen_shopkeeper(cfg, rng, reg, buf, acct, _hubs):
 
     n_spend = rng.poisson(12 * cfg.weeks / 4.3)
     days_s = rng.integers(0, cfg.n_days, n_spend)
-    buf.add(_times(rng, days_s, np.ones(n_spend, dtype=int), 8, 22), acct,
+    buf.add(_times(rng, days_s, np.ones(n_spend, dtype=int), 8, 25), acct,
             _pool_draw(rng, merchants, n_spend, 0.5),
             _lognorm(rng, 600, 0.7, n_spend), CH_CARD)
 
@@ -150,16 +187,17 @@ def gen_freelancer(cfg, rng, reg, buf, acct, _hubs):
     n_inv = rng.poisson(1.4 * cfg.weeks)
     days = np.sort(rng.integers(0, cfg.n_days, n_inv))
     ts_in = _times(rng, days, np.ones(n_inv, dtype=int), 10, 19)
-    amts = _lognorm(rng, 28_000, 0.7, n_inv)
+    amts = _maybe_round(rng, _lognorm(rng, 28_000, 0.7, n_inv), 0.55, 1000)
     buf.add(ts_in, _pool_draw(rng, clients, n_inv, 0.45), acct, amts, CH_NEFT)
 
     rent_days = np.arange(4, cfg.n_days, 30)
     buf.add((rent_days * DAY + 11 * 60).astype(np.int32), acct, landlord,
-            np.full(rent_days.size, float(_lognorm(rng, 14_000, 0.35, 1)[0])), CH_UPI)
+            _maybe_round(rng, np.full(rent_days.size,
+                         float(_lognorm(rng, 14_000, 0.35, 1)[0])), 0.9), CH_UPI)
 
     n_spend = rng.poisson(16 * cfg.weeks / 4.3)
     days_s = rng.integers(0, cfg.n_days, n_spend)
-    buf.add(_times(rng, days_s, np.ones(n_spend, dtype=int), 8, 23), acct,
+    buf.add(_times(rng, days_s, np.ones(n_spend, dtype=int), 8, 26), acct,
             _pool_draw(rng, merchants, n_spend, 0.4),
             _lognorm(rng, 1_200, 0.9, n_spend), CH_CARD)
 
@@ -184,14 +222,17 @@ def gen_small_business(cfg, rng, reg, buf, acct, _hubs, internal_pool=None):
     weekly = np.arange(3, cfg.n_days, 7)
     for v in vendors:
         buf.add((weekly * DAY + rng.integers(10 * 60, 18 * 60, weekly.size)).astype(np.int32),
-                acct, int(v), _lognorm(rng, 22_000, 0.5, weekly.size), CH_NEFT)
+                acct, int(v),
+                _maybe_round(rng, _lognorm(rng, 22_000, 0.5, weekly.size), 0.5, 1000),
+                CH_NEFT)
 
     if internal_pool is not None and len(internal_pool) > 0:
         staff = rng.choice(internal_pool, size=rng.integers(2, 7), replace=False)
         pay_days = np.arange(1, cfg.n_days, 30)
         for s in staff:
             buf.add((pay_days * DAY + 12 * 60).astype(np.int32), acct, int(s),
-                    _lognorm(rng, 18_000, 0.3, pay_days.size), CH_NEFT)
+                    _maybe_round(rng, _lognorm(rng, 18_000, 0.3, pay_days.size),
+                                 0.7, 500), CH_NEFT)
 
 
 def gen_low_activity(cfg, rng, reg, buf, acct, _hubs):
@@ -203,16 +244,16 @@ def gen_low_activity(cfg, rng, reg, buf, acct, _hubs):
     days = rng.integers(0, cfg.n_days, n_in)
     buf.add(_times(rng, days, np.ones(n_in, dtype=int), 9, 21),
             _pool_draw(rng, others, n_in, 0.6), acct,
-            _lognorm(rng, 4_000, 0.8, n_in), CH_UPI)
+            _maybe_round(rng, _lognorm(rng, 4_000, 0.8, n_in), 0.6), CH_UPI)
 
     n_out = rng.poisson(3.0 * cfg.weeks / 4.3)
     days_o = rng.integers(0, cfg.n_days, n_out)
-    buf.add(_times(rng, days_o, np.ones(n_out, dtype=int), 9, 22), acct,
+    buf.add(_times(rng, days_o, np.ones(n_out, dtype=int), 9, 25), acct,
             _pool_draw(rng, merchants, n_out, 0.5),
             _lognorm(rng, 900, 0.8, n_out), CH_UPI)
 
 
-def gen_micro_merchant(cfg, rng, reg, buf, acct, _hubs):
+def gen_micro_merchant(cfg, rng, reg, buf, acct, _hubs, internal_pool=None):
     """Home business: tiffin, tailoring, reselling.
 
     Exists to populate the fan-in band that subtle mules occupy. Without
@@ -221,7 +262,7 @@ def gen_micro_merchant(cfg, rng, reg, buf, acct, _hubs):
     that would never exist in real data.
     """
     customers = reg.new_many("retail_customer", 70)
-    supplier = reg.new("supplier")
+    supplier = _beneficiary(rng, reg, "supplier", internal_pool, 0.45)
     merchants = reg.new_many("merchant", 8)
 
     days = np.arange(cfg.n_days)
@@ -234,19 +275,70 @@ def gen_micro_merchant(cfg, rng, reg, buf, acct, _hubs):
     take = np.zeros(cfg.n_days)
     np.add.at(take, ts_in // DAY, amts_in)
     restock_days = np.arange(rng.integers(0, 3), cfg.n_days, rng.integers(2, 5))
-    frac = rng.uniform(0.45, 0.72)
+    # margins vary hugely: a tailor keeps half, a phone-recharge reseller
+    # keeps 3%. The thin-margin end must exist or nothing legitimate sits
+    # at high pass-through with a mid-range fan-in.
+    frac = rng.uniform(0.45, 0.96)
     for d in restock_days:
         lo = max(0, d - 4)
         amt = take[lo:d + 1].sum() * frac
         if amt > 100:
             buf.add(np.array([d * DAY + rng.integers(10 * 60, 20 * 60)]),
-                    acct, supplier, np.array([amt]), CH_IMPS)
+                    acct, supplier,
+                    _maybe_round(rng, np.array([amt]), 0.4), CH_IMPS)
 
     n_spend = rng.poisson(14 * cfg.weeks / 4.3)
     days_s = rng.integers(0, cfg.n_days, n_spend)
-    buf.add(_times(rng, days_s, np.ones(n_spend, dtype=int), 8, 22), acct,
+    buf.add(_times(rng, days_s, np.ones(n_spend, dtype=int), 8, 25), acct,
             _pool_draw(rng, merchants, n_spend, 0.5),
             _lognorm(rng, 500, 0.8, n_spend), CH_UPI)
+
+
+def gen_collector(cfg, rng, reg, buf, acct, _hubs, internal_pool=None):
+    """Society treasurer, chit-fund operator, tuition-fee collector,
+    travel agent booking for a group.
+
+    THE HARDEST NEGATIVE IN THE DATASET. Collects from 15-40 people who
+    have no obvious link to each other, holds the money for hours, then
+    forwards nearly all of it to one destination. Fan-in high, fan-out one,
+    pass-through 0.9+, same-day drain: a mule on every account-level signal
+    at once, and completely legitimate.
+
+    Without this persona there is no normal account with BOTH a mid-range
+    fan-in AND near-total pass-through, so mules sit alone in that pocket
+    and the model scores a perfect precision on a hole in the simulator
+    rather than on fraud.
+
+    What separates it: the same members pay every cycle, and the
+    destination never changes.
+    """
+    members = reg.new_many("group_member", rng.integers(25, 70))
+    destination = _beneficiary(rng, reg, "institution", internal_pool, 0.5)
+    merchants = reg.new_many("merchant", 5)
+
+    cycle = int(rng.integers(7, 31))
+    keep = rng.uniform(0.02, 0.12)
+    for start in range(int(rng.integers(0, 5)), cfg.n_days, cycle):
+        n = int(rng.integers(8, 30))
+        who = _pool_draw(rng, members, n, 0.55)
+        span = int(rng.integers(1, 4))
+        ts_in = (start * DAY + rng.integers(0, span * DAY, n)).astype(np.int32)
+        ts_in = ts_in[ts_in < cfg.horizon_min]
+        if ts_in.size == 0:
+            continue
+        amts = _maybe_round(rng, _lognorm(rng, 2_800, 0.6, ts_in.size), 0.7)
+        buf.add(ts_in, who[:ts_in.size], acct, amts, CH_UPI)
+
+        t_out = int(ts_in.max()) + int(rng.integers(60, 1200))
+        if t_out < cfg.horizon_min:
+            buf.add(np.array([t_out]), acct, destination,
+                    np.array([amts.sum() * (1 - keep)]), CH_IMPS)
+
+    n_spend = rng.poisson(8 * cfg.weeks / 4.3)
+    days_s = rng.integers(0, cfg.n_days, n_spend)
+    buf.add(_times(rng, days_s, np.ones(n_spend, dtype=int), 8, 25), acct,
+            _pool_draw(rng, merchants, n_spend, 0.5),
+            _lognorm(rng, 600, 0.8, n_spend), CH_UPI)
 
 
 def sprinkle_stranger_credits(cfg, rng, reg, buf, acct):
@@ -264,8 +356,9 @@ def sprinkle_stranger_credits(cfg, rng, reg, buf, acct):
         return
     senders = reg.new_many("one_off", n)
     days = rng.integers(0, cfg.n_days, n)
-    buf.add(_times(rng, days, np.ones(n, dtype=int), 8, 22),
-            senders, acct, _lognorm(rng, 2_500, 1.1, n), CH_UPI)
+    buf.add(_times(rng, days, np.ones(n, dtype=int), 8, 26),
+            senders, acct,
+            _maybe_round(rng, _lognorm(rng, 2_500, 1.1, n), 0.5, 100), CH_UPI)
 
 
 GENERATORS = {
@@ -273,6 +366,7 @@ GENERATORS = {
     "student": gen_student,
     "shopkeeper": gen_shopkeeper,
     "micro_merchant": gen_micro_merchant,
+    "collector": gen_collector,
     "freelancer": gen_freelancer,
     "small_business": gen_small_business,
     "low_activity": gen_low_activity,
@@ -291,7 +385,7 @@ def apply_life_event(cfg, rng, reg, buf, acct, kind, day):
         n = rng.integers(30, 80)
         senders = reg.new_many("wedding_guest", n)
         ts_in = (day * DAY + rng.integers(0, 3 * DAY, n)).astype(np.int32)
-        amts = _lognorm(rng, 8_000, 0.9, n)
+        amts = _maybe_round(rng, _lognorm(rng, 8_000, 0.9, n), 0.8)
         buf.add(ts_in, senders, acct, amts, CH_UPI)
         vendors = reg.new_many("event_vendor", rng.integers(5, 11))
         total = amts.sum() * rng.uniform(0.85, 0.97)
@@ -303,7 +397,7 @@ def apply_life_event(cfg, rng, reg, buf, acct, kind, day):
         n = rng.integers(4, 14)
         senders = reg.new_many("family", n)
         ts_in = (day * DAY + rng.integers(0, 2 * DAY, n)).astype(np.int32)
-        amts = _lognorm(rng, 25_000, 0.7, n)
+        amts = _maybe_round(rng, _lognorm(rng, 25_000, 0.7, n), 0.75, 1000)
         buf.add(ts_in, senders, acct, amts, CH_IMPS)
         hospital = reg.new("institution")
         buf.add(np.array([day * DAY + DAY]), acct, hospital,
@@ -314,7 +408,8 @@ def apply_life_event(cfg, rng, reg, buf, acct, kind, day):
         pay_days = np.arange(day, cfg.n_days, 30)
         if pay_days.size:
             buf.add((pay_days * DAY + 10 * 60).astype(np.int32), new_emp, acct,
-                    _lognorm(rng, 68_000, 0.4, pay_days.size), CH_NEFT)
+                    _maybe_round(rng, _lognorm(rng, 68_000, 0.4, pay_days.size),
+                                 0.6, 100), CH_NEFT)
 
     elif kind == "city_move":
         # every beneficiary is suddenly new -- and income follows the person,
@@ -323,9 +418,10 @@ def apply_life_event(cfg, rng, reg, buf, acct, kind, day):
         pay = np.arange(day, cfg.n_days, 30)
         if pay.size:
             buf.add((pay * DAY + 10 * 60).astype(np.int32), new_emp, acct,
-                    _lognorm(rng, 60_000, 0.4, pay.size), CH_NEFT)
+                    _maybe_round(rng, _lognorm(rng, 60_000, 0.4, pay.size),
+                                 0.6, 100), CH_NEFT)
         new_ben = reg.new_many("merchant", rng.integers(6, 14))
         n = rng.integers(15, 40)
         days_o = rng.integers(day, cfg.n_days, n)
-        buf.add(_times(rng, days_o, np.ones(n, dtype=int), 8, 22), acct,
+        buf.add(_times(rng, days_o, np.ones(n, dtype=int), 8, 25), acct,
                 rng.choice(new_ben, size=n), _lognorm(rng, 3_500, 0.9, n), CH_UPI)

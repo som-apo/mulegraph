@@ -178,6 +178,17 @@ def generate_rings(cfg, rng, reg, buf, accounts, rings):
                     continue
                 delay = int(rng.integers(*policy["drain_delay_min"]))
                 t = int(ts_s[sl].max()) + delay
+                # A 4-10 hour delay applied to a credit that arrived at 10pm
+                # lands the forward at 4am. That made "fraction of activity at
+                # night" a near-perfect mule detector (AUC 0.93) -- the model
+                # was learning the simulator's clock, not fraud. Real operators
+                # mostly move money when they are awake, so pushes that land in
+                # the dead of night usually wait for morning.
+                hour = (t % DAY) // 60
+                if 1 <= hour < 6 and rng.random() < 0.8:
+                    t = (t // DAY) * DAY + int(rng.integers(7 * 60, 11 * 60))
+                    if t <= int(ts_s[sl].max()):
+                        t += DAY
                 if t >= cfg.horizon_min:
                     continue
                 f_ts.append(t)

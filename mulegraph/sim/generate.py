@@ -59,7 +59,7 @@ def simulate(cfg: SimConfig | None = None, verbose: bool = True):
     for aid, persona in zip(accounts["account_id"].to_numpy(),
                             accounts["persona"].to_numpy()):
         gen = P.GENERATORS[persona]
-        if persona == "small_business":
+        if persona in ("small_business", "shopkeeper", "micro_merchant", "collector"):
             gen(cfg, rng, reg, buf, int(aid), employer_hubs, internal_pool=salaried_pool)
         else:
             gen(cfg, rng, reg, buf, int(aid), employer_hubs)
@@ -102,6 +102,62 @@ def simulate(cfg: SimConfig | None = None, verbose: bool = True):
         drop = is_outflow & (day >= src_cut)
         keep_tail = drop & (np.random.default_rng(cfg.seed + 1).random(len(normal_df)) < 0.40)
         normal_df = normal_df[~(drop & ~keep_tail)].copy()
+
+    # ---- 3a. hide some rings from the label set ----------------------
+    # These accounts really are mules and really do behave like mules.
+    # They are simply ones nobody ever confirmed, so they carry a negative
+    # label. Every one the model surfaces will be scored as a false
+    # positive even though the model was right -- which is exactly what
+    # happens to a real fraud team, and why precision measured against
+    # confirmed labels understates a working system.
+    accounts["true_mule"] = accounts["is_mule"]
+    accounts["true_difficulty"] = accounts["mule_difficulty"]
+    if cfg.unlabeled_ring_fraction > 0 and plan:
+        rng_u = np.random.default_rng(cfg.seed + 3)
+        ids = np.array([r["ring_id"] for r in plan])
+        n_hidden = max(1, int(len(ids) * cfg.unlabeled_ring_fraction))
+        hidden = set(rng_u.choice(ids, size=n_hidden, replace=False).tolist())
+        mask = accounts["ring_id"].isin(hidden) & accounts["is_mule"]
+        accounts.loc[mask, "is_mule"] = False
+        accounts.loc[mask, "mule_difficulty"] = ""
+        if verbose:
+            print(f"[sim] {int(mask.sum()):,} mules across {len(hidden)} rings "
+                  f"are UNLABELLED (never confirmed) -- they count as "
+                  f"negatives in every metric")
+
+    # ---- 3b. some legitimate accounts also START mid-window ----------
+    # Every mule activates partway through the window. If every legitimate
+    # account has been running since week 1, then "this account recently
+    # started doing something new" is a perfect mule detector -- and the
+    # changepoint features (throughput_jump, fanin_jump, dormant_before,
+    # active_days_ratio) were carrying the whole model, giving precision
+    # 1.000 at 80% recall on an artefact.
+    #
+    # People start things all the time: a new tiffin service, a shop that
+    # opened last month, whoever just became this year's society treasurer.
+    # Those accounts have exactly the mule changepoint signature and are
+    # entirely innocent.
+    newbiz_personas = ("collector", "micro_merchant", "shopkeeper",
+                       "small_business", "freelancer")
+    cand = accounts[(accounts["persona"].isin(newbiz_personas))
+                    & (~accounts["is_mule"])]["account_id"].to_numpy()
+    if len(cand):
+        rng_nb = np.random.default_rng(cfg.seed + 2)
+        n_new = int(0.16 * len(cand))
+        newbiz = rng_nb.choice(cand, size=n_new, replace=False)
+        start_days = rng_nb.integers(cfg.baseline_weeks * 7 - 21,
+                                     cfg.n_days - 6, size=n_new)
+        nb_cut = pd.Series(dict(zip(newbiz.tolist(), start_days.tolist())),
+                           dtype="int64")
+        src_nb = normal_df["src"].map(nb_cut)
+        dst_nb = normal_df["dst"].map(nb_cut)
+        acct_nb = src_nb.fillna(dst_nb)
+        day_nb = normal_df["ts_min"] // 1440
+        normal_df = normal_df[~(acct_nb.notna() & (day_nb < acct_nb))].copy()
+        accounts.loc[accounts["account_id"].isin(newbiz), "life_event"] = "new_business"
+        if verbose:
+            print(f"[sim] {n_new:,} legitimate accounts start mid-window "
+                  f"(new shop, new treasurer, new side income)")
 
     # ---- 4. combine --------------------------------------------------
     txns = pd.concat([normal_df, ring_df], ignore_index=True)
