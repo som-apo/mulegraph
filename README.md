@@ -5,7 +5,7 @@ rented pipes -- valid KYC, fraud money passing through. MuleGraph catches
 them by behaviour and by ring structure, then hands out a ranked daily
 review queue with reason codes.
 
-**[Full results, with the leaks we found and fixed](RESULTS.md)**
+**[Open the live review queue](https://som-apo.github.io/mulegraph/dashboard.html)** · [Full results and the leaks we found](RESULTS.md)
 
 ## Headline numbers
 
