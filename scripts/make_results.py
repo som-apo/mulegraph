@@ -137,6 +137,36 @@ def main():
 
     best = scores["C: + graph"]
     f = f.assign(score=best)
+
+    # ---- why not just write rules? -----------------------------------
+    # The first question anyone asks about a fraud model. Every bank starts
+    # with rules; they are cheaper, faster and easier to defend to a
+    # regulator. Answering it with evidence is worth more than asserting
+    # that machine learning is better.
+    try:
+        from scripts.baselines import compare as _cmp
+    except Exception:
+        import importlib.util as _il
+        _sp = _il.spec_from_file_location("bl", "scripts/baselines.py")
+        _m = _il.module_from_spec(_sp); _sp.loader.exec_module(_m)
+        _cmp = _m.compare
+    bt = _cmp(f.assign(score=best))
+    parts.append("\n## Why not just write rules?\n")
+    parts.append("Rules are not stupid. They are cheap, fast, auditable and "
+                 "easy to defend to a regulator, and every bank starts with "
+                 "them. So the honest comparison is to build the rulebook a "
+                 "fraud analyst would actually write, run it on the same data, "
+                 "and evaluate the model at the same queue size.\n")
+    parts.append(md_table(bt) + "\n")
+    parts.append("\nRules fail here for a specific reason, and it is the "
+                 "premise of the whole project: a careful mule keeps every "
+                 "individual condition inside the acceptable range. "
+                 "0.86 pass-through rather than 0.99. Seven hours to drain "
+                 "rather than seven minutes. Each condition passes on its own, "
+                 "so an AND of conditions never fires -- and loosening any one "
+                 "of them sweeps in every shopkeeper and treasurer in the "
+                 "population.\n")
+
     parts.append("\n## Cost curve\n")
     parts.append(md_table(cost_curve(y, best).round(3)) + "\n")
 

@@ -5,7 +5,14 @@ rented pipes -- valid KYC, fraud money passing through. MuleGraph catches
 them by behaviour and by ring structure, then hands out a ranked daily
 review queue with reason codes.
 
-**[Open the live review queue](https://som-apo.github.io/mulegraph/dashboard.html)** · [Full results and the leaks we found](RESULTS.md)
+**[Open the live review queue](https://som-apo.github.io/mulegraph/dashboard.html)**
+· [Full results](RESULTS.md)
+· [What broke at 2am, and how we got out](WHAT_BROKE.md)
+
+Mule accounts are where merchant fraud money lands - fake seller payouts,
+stolen-card refunds, gig cash-outs. Catching the ring is catching the loss,
+and catching it before a complaint exists rather than after the account
+already holds nothing.
 
 ## Headline numbers
 

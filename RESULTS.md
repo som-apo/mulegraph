@@ -53,6 +53,21 @@ Ring throughput is fixed in rupees; ring **size** is derived by dividing it by p
 | subtle | 41 | 127973 |
 
 
+## Why not just write rules?
+
+Rules are not stupid. They are cheap, fast, auditable and easy to defend to a regulator, and every bank starts with them. So the honest comparison is to build the rulebook a fraud analyst would actually write, run it on the same data, and evaluate the model at the same queue size.
+
+| approach | flagged | caught | precision | recall | model precision at same size | model recall at same size |
+|---|---|---|---|---|---|---|
+| Rule: pass-through > 0.90 and drains within 6h | 12629 | 64 | 0.005 | 0.118 | 0.043 | 1.0 |
+| Rule: + fan-in >= 10 and 3x throughput jump | 1422 | 88 | 0.062 | 0.162 | 0.38 | 0.994 |
+| Best single feature, best threshold (n_debits) | 2482 | 164 | 0.066 | 0.302 | 0.218 | 0.996 |
+| Random selection of 1,422 accounts | 1422 | 14 | 0.01 | 0.026 | 0.38 | 0.994 |
+
+
+Rules fail here for a specific reason, and it is the premise of the whole project: a careful mule keeps every individual condition inside the acceptable range. 0.86 pass-through rather than 0.99. Seven hours to drain rather than seven minutes. Each condition passes on its own, so an AND of conditions never fires -- and loosening any one of them sweeps in every shopkeeper and treasurer in the population.
+
+
 ## Cost curve
 
 | budget | caught | false_positives | precision | recall | value_prevented | review_cost | net_value |
